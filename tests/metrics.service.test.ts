@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DataSource } from 'typeorm';
 import { MetricEntity } from '../src/metrics/entities/metric.entity';
+import { DailyMetricSnapshotEntity } from '../src/metrics/entities/daily-metric-snapshot.entity';
 import { MetricsService } from '../src/metrics/metrics.service';
 
 describe('MetricsService', () => {
@@ -10,12 +11,15 @@ describe('MetricsService', () => {
   beforeEach(async () => {
     dataSource = new DataSource({
       type: 'sqljs',
-      entities: [MetricEntity],
+      entities: [MetricEntity, DailyMetricSnapshotEntity],
       synchronize: true,
     });
 
     await dataSource.initialize();
-    service = new MetricsService(dataSource.getRepository(MetricEntity));
+    service = new MetricsService(
+      dataSource.getRepository(MetricEntity),
+      dataSource.getRepository(DailyMetricSnapshotEntity),
+    );
   });
 
   afterEach(async () => {

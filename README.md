@@ -29,14 +29,21 @@ Entity: `Metric`
 - `date` (`YYYY-MM-DD`)
 - `createdAt`
 
-Key decision: the database stores the original value and original unit instead of normalizing on write.
+Entity: `DailyMetricSnapshot`
 
-Trade-off:
+- `id`
+- `userId`
+- `type`
+- `metricId` — source metric this snapshot was derived from
+- `value`
+- `unit`
+- `date` (`YYYY-MM-DD`)
+- `metricCreatedAt` — createdAt of the source metric
+- `snapshotAt` — when the cron job produced the row
 
-- simpler writes and better preservation of what the user submitted
-- slightly more processing on reads when a target unit is requested
+A unique constraint on `(userId, type, date)` enforces one snapshot row per user/type/day. The cron job deletes the stale row and re-inserts when it refreshes.
 
-I kept that trade-off because the assessment focuses on correctness and clarity more than high-volume analytical workloads.
+Key decision: both tables store the original value and original unit instead of normalising on write.
 
 ## 3. API Design
 
@@ -115,7 +122,7 @@ Success response (`200 OK`):
 }
 ```
 
-### Get Chart Data
+### Get Chart Data (v1)
 
 `GET /metrics/chart?userId=&type=&from=&to=&period=&unit=`
 
@@ -123,7 +130,7 @@ Chart logic:
 
 - filter by user and metric type
 - filter by explicit date range or period
-- keep only the latest entry per day
+- keep only the latest entry per day using a SQL window function at query time
 - convert to the requested unit, or to the metric's base unit when no unit is supplied
 
 Success response (`200 OK`):
@@ -155,6 +162,34 @@ Success response (`200 OK`):
 
 The base-unit default on chart queries is an intentional deviation from the original outline. It makes chart values directly comparable even when the stored data mixes units.
 
+### Get Chart Data v2
+
+`GET /metrics/chart/v2?userId=&type=&from=&to=&period=&unit=`
+
+Accepts the same query parameters as `GET /metrics/chart`. Instead of running the window-function query at request time, it reads the pre-computed `daily_metric_snapshots` table that is populated nightly by the cron job.
+
+Success response (`200 OK`) — same shape as v1:
+
+```json
+{
+  "data": [
+    {
+      "metricId": "1fc4a3cb-fd85-452b-9ca8-4f91ff503e75",
+      "date": "2026-03-30",
+      "value": 6.56168,
+      "unit": "ft",
+      "createdAt": "2026-04-01T16:27:04.332Z"
+    }
+  ],
+  "meta": {
+    "count": 1,
+    "unit": "ft"
+  }
+}
+```
+
+Note: snapshots are written once per day by the cron job. Data inserted after a snapshot run will not appear in v2 results until the next run (or a manual refresh).
+
 ## 4. Core Logic
 
 ### 4.1 Unit Conversion
@@ -173,7 +208,7 @@ This keeps conversion logic linear instead of building a separate conversion for
 
 ### 4.2 Latest Per Day
 
-The chart query uses a SQL window function:
+The v1 chart query uses a SQL window function:
 
 ```sql
 ROW_NUMBER() OVER (PARTITION BY date ORDER BY created_at DESC, id DESC)
@@ -181,17 +216,48 @@ ROW_NUMBER() OVER (PARTITION BY date ORDER BY created_at DESC, id DESC)
 
 That lets SQLite return only the newest metric for each day directly in the database layer.
 
+### 4.3 Daily Snapshot Cron Job
+
+A NestJS `@Cron` task (`MetricsCronService`) runs at **00:05 every day** and materialises the latest metric per `(userId, type, date)` for the previous calendar day into the `daily_metric_snapshots` table.
+
+Cron expression: `5 0 * * *`
+
+The job logic:
+
+1. Determine yesterday's date.
+2. Run the same window-function query used by v1 but partitioned by `(userId, type)` instead of just `date`.
+3. For each resulting row, delete the existing snapshot (if any) for that `(userId, type, date)` triple and insert the fresh one.
+
+The `refreshSnapshotsForDate(date)` method is also exported so historical dates can be back-filled on demand without triggering the scheduler.
+
+### 4.4 Trade-offs: Chart v1 vs Chart v2
+
+| | **v1 — live window function** | **v2 — snapshot table** |
+|---|---|---|
+| **Freshness** | Always reflects the latest data, including metrics inserted moments ago | Up to ~24 h stale; reflects whatever was the last metric at snapshot time |
+| **Read performance** | `O(n)` window function over all matching rows on every request | Simple indexed point-read on `daily_metric_snapshots`; fast regardless of how many raw rows exist |
+| **Write overhead** | None — only the `metrics` table is written | Cron job performs one delete + one insert per `(userId, type)` per day |
+| **Operational complexity** | No extra infrastructure | Requires the scheduler to be running; snapshot gaps appear if the job fails silently |
+| **Data consistency** | Always consistent with `metrics` | Can diverge if a metric is retroactively inserted or corrected for a past date after the snapshot ran |
+| **Best for** | Low-to-medium data volumes where real-time accuracy matters | High data volumes or dashboards where slightly stale data is acceptable and query speed is the priority |
+
+**Chosen approach:** both endpoints are kept. v1 is the canonical answer; v2 is additive and shows how the system can be extended for performance without changing the existing contract.
+
 ## 5. Performance
 
 - TypeORM index on `(userId, type, date, createdAt)` supports the main read paths.
 - Filtering and ordering happen in the database layer through TypeORM.
-- The chart endpoint uses a raw SQL window function so latest-per-day reduction happens in the database, not in an application loop.
+- The v1 chart endpoint uses a raw SQL window function so latest-per-day reduction happens in the database, not in an application loop.
+- The v2 chart endpoint reads from the pre-computed `daily_metric_snapshots` table, avoiding the window function entirely. It is faster at large data volumes because the heavy work is done offline by the cron job.
 - Unit conversion runs after filtering, so only the final result set is transformed.
 
 ## 6. Code Structure
 
 - `src/main.ts` -> NestJS bootstrap
-- `src/metrics` -> controller, service, DTOs, and TypeORM entity
+- `src/metrics` -> controller, service, cron service, DTOs, and TypeORM entities
+  - `entities/metric.entity.ts` -> raw metric rows
+  - `entities/daily-metric-snapshot.entity.ts` -> pre-computed latest-per-day rows
+  - `metrics-cron.service.ts` -> nightly snapshot job
 - `src/utils` -> conversion and date utilities
 - `src/types` -> metric type definitions
 
@@ -250,10 +316,16 @@ List temperature metrics converted to Fahrenheit:
 curl "http://localhost:3000/metrics?userId=user-123&type=TEMPERATURE&from=2026-03-01&to=2026-03-31&unit=F"
 ```
 
-Fetch one month of chart data in feet:
+Fetch one month of chart data in feet (v1 — live window function):
 
 ```bash
 curl "http://localhost:3000/metrics/chart?userId=user-123&type=DISTANCE&period=1m&unit=ft"
+```
+
+Fetch one month of chart data in feet (v2 — reads snapshot table):
+
+```bash
+curl "http://localhost:3000/metrics/chart/v2?userId=user-123&type=DISTANCE&period=1m&unit=ft"
 ```
 
 ## Example Error Response

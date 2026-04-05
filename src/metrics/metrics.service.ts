@@ -5,6 +5,7 @@ import { Between, FindOperator, FindOptionsWhere, LessThanOrEqual, MoreThanOrEqu
 import { QueryMetricsDto } from './dto/query-metrics.dto';
 import { CreateMetricDto } from './dto/create-metric.dto';
 import { MetricEntity } from './entities/metric.entity';
+import { DailyMetricSnapshotEntity } from './entities/daily-metric-snapshot.entity';
 import { ChartPoint, MetricRecord, MetricType, MetricUnit } from '../types/metric';
 import { convertValue, getBaseUnit, isUnitCompatible } from '../utils/units';
 import { resolveDateRange } from '../utils/date';
@@ -22,6 +23,8 @@ export class MetricsService {
   constructor(
     @InjectRepository(MetricEntity)
     private readonly metricRepository: Repository<MetricEntity>,
+    @InjectRepository(DailyMetricSnapshotEntity)
+    private readonly snapshotRepository: Repository<DailyMetricSnapshotEntity>,
   ) {}
 
   async createMetric(input: CreateMetricDto): Promise<MetricRecord> {
@@ -105,6 +108,41 @@ export class MetricsService {
       value: convertValue(Number(metric.value), metric.unit, targetUnit),
       unit: targetUnit,
       createdAt: this.toIsoString(metric.createdAt),
+    }));
+  }
+
+  async getChartDataV2(query: QueryMetricsDto): Promise<ChartPoint[]> {
+    this.ensureQueryIsValid(query);
+
+    const { from, to } = resolveDateRange(query);
+    const targetUnit = query.unit ?? getBaseUnit(query.type);
+
+    const where: FindOptionsWhere<DailyMetricSnapshotEntity> & {
+      date?: FindOperator<string>;
+    } = {
+      userId: query.userId,
+      type: query.type,
+    };
+
+    if (from && to) {
+      where.date = Between(from, to);
+    } else if (from) {
+      where.date = MoreThanOrEqual(from);
+    } else if (to) {
+      where.date = LessThanOrEqual(to);
+    }
+
+    const snapshots = await this.snapshotRepository.find({
+      where,
+      order: { date: 'ASC' },
+    });
+
+    return snapshots.map((s) => ({
+      metricId: s.metricId,
+      date: s.date,
+      value: convertValue(Number(s.value), s.unit, targetUnit),
+      unit: targetUnit,
+      createdAt: this.toIsoString(s.metricCreatedAt),
     }));
   }
 

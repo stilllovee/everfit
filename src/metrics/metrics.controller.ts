@@ -40,4 +40,23 @@ export class MetricsController {
       },
     };
   }
+
+  /**
+   * Chart data v2 — reads from the pre-computed daily_metric_snapshots table
+   * that is populated by the nightly cron job.  Identical query parameters to
+   * GET /metrics/chart; faster at scale because the latest-per-day reduction
+   * is already materialised.
+   */
+  @Get('chart/v2')
+  async getChartDataV2(@Query() query: QueryMetricsDto) {
+    const chartData = await this.metricsService.getChartDataV2(query);
+
+    return {
+      data: chartData,
+      meta: {
+        count: chartData.length,
+        unit: query.unit ?? getBaseUnit(query.type),
+      },
+    };
+  }
 }
