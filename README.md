@@ -285,7 +285,7 @@ Alternatives:
 
 - **InfluxDB / TimescaleDB** — purpose-built for append-heavy time-series data. TimescaleDB in particular is a PostgreSQL extension, so TypeORM migrations and existing SQL knowledge transfer directly.
 - **MongoDB** — document model fits the metric payload naturally. Write throughput scales via sharding on `userId`; reads can leverage aggregation pipelines instead of window functions.
-- **Redis Streams / Kafka** — for burst ingestion, decouple the HTTP write path from persistence by publishing to a stream and consuming asynchronously. This prevents the database from being the bottleneck during traffic spikes.
+- **Kafka (preferred) / AWS Kinesis** — for burst ingestion, decouple the HTTP write path from persistence by publishing to a stream and consuming asynchronously. This prevents the database from being the bottleneck during traffic spikes. **Kafka** is the default recommendation: it is broker-agnostic, supports higher throughput, longer retention, and integrates directly with NestJS via `@nestjs/microservices`. **Kinesis** is a viable drop-in if the deployment is fully AWS-native and managed operational overhead is the priority, but comes with per-shard throughput limits and vendor lock-in.
 
 ### 6.2 Read Scalability — CQRS and Read Replicas
 
