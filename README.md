@@ -275,41 +275,11 @@ The `refreshSnapshotsForDate(date)` method is also exported so historical dates 
 
 ## 6. Scaling Further
 
-The current design is intentionally simple and targets a single-instance deployment with a small user base. As the system grows, the following approaches could be adopted incrementally.
+The current design targets a single-instance deployment. If load grows, the following directions are worth considering:
 
-### 6.1 Write-Heavy Load — Consider a Time-Series or Document Store
-
-SQLite (and even PostgreSQL with a relational schema) can become a bottleneck when ingestion volume is high, because every insert hits the same indexed table.
-
-Alternatives:
-
-- **InfluxDB / TimescaleDB** — purpose-built for append-heavy time-series data. TimescaleDB in particular is a PostgreSQL extension, so TypeORM migrations and existing SQL knowledge transfer directly.
-- **MongoDB** — document model fits the metric payload naturally. Write throughput scales via sharding on `userId`; reads can leverage aggregation pipelines instead of window functions.
-- **Kafka (preferred) / AWS Kinesis** — for burst ingestion, decouple the HTTP write path from persistence by publishing to a stream and consuming asynchronously. This prevents the database from being the bottleneck during traffic spikes. **Kafka** is the default recommendation: it is broker-agnostic, supports higher throughput, longer retention, and integrates directly with NestJS via `@nestjs/microservices`. **Kinesis** is a viable drop-in if the deployment is fully AWS-native and managed operational overhead is the priority, but comes with per-shard throughput limits and vendor lock-in.
-
-### 6.2 Read Scalability — CQRS and Read Replicas
-
-The current architecture co-locates reads and writes. Separating them enables independent scaling:
-
-- **CQRS (Command Query Responsibility Segregation)** — split the write model (`MetricsService.createMetric`) from the read model (`getChartData`, `listMetrics`). Commands write to the source-of-truth store; a projection process (the existing cron job is a rudimentary version of this) maintains a read-optimised view.
-- **Read replicas** — in PostgreSQL, streaming replication lets read queries run against replicas while writes go to the primary. The v2 snapshot table is already read-only and an ideal candidate to serve from a replica.
-- **Materialised views** — instead of the application-level cron, the snapshot logic can be expressed as a database materialised view refreshed on a schedule, offloading the work entirely to the database engine.
-
-### 6.3 Microservices Split
-
-If metric types grow or teams scale, the monolith can be decomposed:
-
-- **Ingestion service** — accepts writes, validates, publishes a `metric.created` event to a message broker (Kafka, RabbitMQ).
-- **Query service** — subscribes to events, maintains its own read-optimised store (e.g. a pre-aggregated time-series collection), and serves chart and list endpoints. This service can be scaled independently of the write path.
-- **Snapshot/projection worker** — replaces `MetricsCronService`; a dedicated consumer that updates materialised views in near-real-time instead of once per day, reducing the eventual consistency window from ~24 h to seconds.
-
-### 6.4 API Gateway and Versioning
-
-With v1 and v2 already in place, an API gateway (Kong, AWS API Gateway, or an Nginx reverse proxy) can route traffic between versions without changing the application code. This also enables:
-
-- gradual traffic shifting (canary releases)
-- rate limiting per `userId`
-- centralised request logging and tracing
+- **Storage** — swap SQLite for PostgreSQL with read replicas (SQL) or a clustered NoSQL store such as MongoDB / TimescaleDB for write-heavy time-series workloads.
+- **Ingestion** — decouple the write path with a message broker (Kafka or AWS Kinesis) to absorb burst traffic without pressuring the database.
+- **Read/write separation** — apply CQRS to split the write model from the read model, allowing each to scale and evolve independently.
 
 ## 7. Code Structure
 
