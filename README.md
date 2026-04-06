@@ -4,7 +4,26 @@
 
 Estimated implementation time before starting: 3 to 4 hours.
 
-## 1. Overview
+## 1. Requirements
+
+### Functional Requirements
+
+Users should be able to:
+
+1. **Record a metric** — submit a measurement (value, unit, date) for a given metric type (distance or temperature) tied to their user ID.
+2. **Retrieve a metric list** — query all recorded metrics by type, with optional date-range or period filters, and receive values converted to a requested unit.
+3. **Retrieve chart-ready data** — get one data point per calendar day (the latest entry for that day), filtered by type and period, with optional unit conversion.
+
+### Non-functional Requirements
+
+1. **Scale is out of scope** — the system targets a small number of users and low request volume; no horizontal scaling, sharding, or read replicas are needed. `userId` is trusted as-is and authentication is handled outside this service.
+
+
+> **Note on the database:** This project uses SQLite via `sql.js` for zero-configuration setup. SQLite is sufficient for a single-instance API handling a small number of users. In a real-world deployment, swap the TypeORM data-source to **PostgreSQL** (or another production-grade RDBMS) to gain concurrent writes, mature tooling, and proper connection pooling.
+
+---
+
+## 2. Overview
 
 This project implements a small Metric Tracking System in Node.js for two metric families: distance and temperature. Users can store measurements by day, retrieve raw history, and fetch chart-ready data that keeps only the latest entry per day. The API also supports on-demand unit conversion, so writes stay simple while reads can adapt to the caller's preferred unit.
 
@@ -17,7 +36,7 @@ This project implements a small Metric Tracking System in Node.js for two metric
 - SQLite-compatible persistence via `sql.js`
 - Vitest for tests
 
-## 2. Data Model
+## 3. Data Model
 
 Entity: `Metric`
 
@@ -45,7 +64,7 @@ A unique constraint on `(userId, type, date)` enforces one snapshot row per user
 
 Key decision: both tables store the original value and original unit instead of normalising on write.
 
-## 3. API Design
+## 4. API Design
 
 ### Create Metric
 
@@ -190,9 +209,9 @@ Success response (`200 OK`) — same shape as v1:
 
 Note: snapshots are written once per day by the cron job. Data inserted after a snapshot run will not appear in v2 results until the next run (or a manual refresh).
 
-## 4. Core Logic
+## 5. Core Logic
 
-### 4.1 Unit Conversion
+### 5.1 Unit Conversion
 
 Base units:
 
@@ -206,7 +225,7 @@ Conversion flow:
 
 This keeps conversion logic linear instead of building a separate conversion for every unit pair.
 
-### 4.2 Latest Per Day
+### 5.2 Latest Per Day
 
 The v1 chart query uses a SQL window function:
 
@@ -216,7 +235,7 @@ ROW_NUMBER() OVER (PARTITION BY date ORDER BY created_at DESC, id DESC)
 
 That lets SQLite return only the newest metric for each day directly in the database layer.
 
-### 4.3 Daily Snapshot Cron Job
+### 5.3 Daily Snapshot Cron Job
 
 A NestJS `@Cron` task (`MetricsCronService`) runs at **00:05 every day** and materialises the latest metric per `(userId, type, date)` for the previous calendar day into the `daily_metric_snapshots` table.
 
@@ -230,7 +249,7 @@ The job logic:
 
 The `refreshSnapshotsForDate(date)` method is also exported so historical dates can be back-filled on demand without triggering the scheduler.
 
-### 4.4 Trade-offs: Chart v1 vs Chart v2
+### 5.4 Trade-offs: Chart v1 vs Chart v2
 
 | | **v1 — live window function** | **v2 — snapshot table** |
 |---|---|---|
@@ -243,7 +262,7 @@ The `refreshSnapshotsForDate(date)` method is also exported so historical dates 
 
 **Chosen approach:** both endpoints are kept. v1 is the canonical answer; v2 is additive and shows how the system can be extended for performance without changing the existing contract.
 
-## 5. Performance
+## 6. Performance
 
 - TypeORM index on `(userId, type, date, createdAt)` supports the main read paths.
 - Filtering and ordering happen in the database layer through TypeORM.
@@ -251,7 +270,7 @@ The `refreshSnapshotsForDate(date)` method is also exported so historical dates 
 - The v2 chart endpoint reads from the pre-computed `daily_metric_snapshots` table, avoiding the window function entirely. It is faster at large data volumes because the heavy work is done offline by the cron job.
 - Unit conversion runs after filtering, so only the final result set is transformed.
 
-## 6. Code Structure
+## 7. Code Structure
 
 - `src/main.ts` -> NestJS bootstrap
 - `src/metrics` -> controller, service, cron service, DTOs, and TypeORM entities
@@ -261,7 +280,7 @@ The `refreshSnapshotsForDate(date)` method is also exported so historical dates 
 - `src/utils` -> conversion and date utilities
 - `src/types` -> metric type definitions
 
-## 7. Tests
+## 8. Tests
 
 Included tests cover:
 
@@ -269,13 +288,6 @@ Included tests cover:
 - compatibility checks between metric types and units
 - latest-per-day chart logic
 - converted list responses
-
-## 8. Assumptions
-
-- dates are treated as UTC calendar dates
-- a user can store multiple metrics on the same day
-- authentication is out of scope; `userId` is always supplied by the caller
-- validation is intentionally practical, not domain-heavy
 
 ## Run Locally
 
