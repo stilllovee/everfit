@@ -68,7 +68,7 @@ Key decision: both tables store the original value and original unit instead of 
 
 ### Create Metric
 
-`POST /metrics`
+`POST /api/v1/metrics` · `POST /api/v2/metrics`
 
 Request body:
 
@@ -100,7 +100,7 @@ Success response (`201 Created`):
 
 ### Get Metric List
 
-`GET /metrics?userId=&type=&from=&to=&period=&unit=`
+`GET /api/v1/metrics?userId=&type=&from=&to=&period=&unit=` · `GET /api/v2/metrics?userId=&type=&from=&to=&period=&unit=`
 
 Supported filters:
 
@@ -143,7 +143,7 @@ Success response (`200 OK`):
 
 ### Get Chart Data (v1)
 
-`GET /metrics/chart?userId=&type=&from=&to=&period=&unit=`
+`GET /api/v1/metrics/chart?userId=&type=&from=&to=&period=&unit=`
 
 Chart logic:
 
@@ -183,9 +183,9 @@ The base-unit default on chart queries is an intentional deviation from the orig
 
 ### Get Chart Data v2
 
-`GET /metrics/chart/v2?userId=&type=&from=&to=&period=&unit=`
+`GET /api/v2/metrics/chart?userId=&type=&from=&to=&period=&unit=`
 
-Accepts the same query parameters as `GET /metrics/chart`. Instead of running the window-function query at request time, it reads the pre-computed `daily_metric_snapshots` table that is populated nightly by the cron job.
+Accepts the same query parameters as `GET /api/v1/metrics/chart`. Instead of running the window-function query at request time, it reads the pre-computed `daily_metric_snapshots` table that is populated nightly by the cron job.
 
 Success response (`200 OK`) — same shape as v1:
 
@@ -311,7 +311,7 @@ The server starts on `http://localhost:3000` by default.
 Create a metric:
 
 ```bash
-curl -X POST http://localhost:3000/metrics \
+curl -X POST http://localhost:3000/api/v1/metrics \
   -H "Content-Type: application/json" \
   -d '{
     "userId": "user-123",
@@ -325,19 +325,19 @@ curl -X POST http://localhost:3000/metrics \
 List temperature metrics converted to Fahrenheit:
 
 ```bash
-curl "http://localhost:3000/metrics?userId=user-123&type=TEMPERATURE&from=2026-03-01&to=2026-03-31&unit=F"
+curl "http://localhost:3000/api/v1/metrics?userId=user-123&type=TEMPERATURE&from=2026-03-01&to=2026-03-31&unit=F"
 ```
 
 Fetch one month of chart data in feet (v1 — live window function):
 
 ```bash
-curl "http://localhost:3000/metrics/chart?userId=user-123&type=DISTANCE&period=1m&unit=ft"
+curl "http://localhost:3000/api/v1/metrics/chart?userId=user-123&type=DISTANCE&period=1m&unit=ft"
 ```
 
 Fetch one month of chart data in feet (v2 — reads snapshot table):
 
 ```bash
-curl "http://localhost:3000/metrics/chart/v2?userId=user-123&type=DISTANCE&period=1m&unit=ft"
+curl "http://localhost:3000/api/v2/metrics/chart?userId=user-123&type=DISTANCE&period=1m&unit=ft"
 ```
 
 ## Example Error Response
