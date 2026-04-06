@@ -17,6 +17,7 @@ Users should be able to:
 ### Non-functional Requirements
 
 1. **Scale is out of scope** — the system targets a small number of users and low request volume; no horizontal scaling, sharding, or read replicas are needed. `userId` is trusted as-is and authentication is handled outside this service.
+2. **Eventual consistency** — the system does not require real-time accuracy for the chart endpoint.
 
 
 > **Note on the database:** This project uses SQLite via `sql.js` for zero-configuration setup. SQLite is sufficient for a single-instance API handling a small number of users. In a real-world deployment, swap the TypeORM data-source to **PostgreSQL** (or another production-grade RDBMS) to gain concurrent writes, mature tooling, and proper connection pooling.
@@ -209,7 +210,7 @@ Success response (`200 OK`) — same shape as v1:
 
 Note: snapshots are written once per day by the cron job. Data inserted after a snapshot run will not appear in v2 results until the next run (or a manual refresh).
 
-## 5. Core Logic
+## 5. Deep Dive
 
 ### 5.1 Unit Conversion
 
@@ -251,24 +252,64 @@ The `refreshSnapshotsForDate(date)` method is also exported so historical dates 
 
 ### 5.4 Trade-offs: Chart v1 vs Chart v2
 
-| | **v1 — live window function** | **v2 — snapshot table** |
+| | **v1 — live window function** | **v2 — eventual consistency via snapshot** |
 |---|---|---|
+| **Consistency model** | Strong consistency — reads always reflect the latest committed write | Eventual consistency — reads reflect the state at the last snapshot run (up to ~24 h lag) |
 | **Freshness** | Always reflects the latest data, including metrics inserted moments ago | Up to ~24 h stale; reflects whatever was the last metric at snapshot time |
 | **Read performance** | `O(n)` window function over all matching rows on every request | Simple indexed point-read on `daily_metric_snapshots`; fast regardless of how many raw rows exist |
 | **Write overhead** | None — only the `metrics` table is written | Cron job performs one delete + one insert per `(userId, type)` per day |
 | **Operational complexity** | No extra infrastructure | Requires the scheduler to be running; snapshot gaps appear if the job fails silently |
-| **Data consistency** | Always consistent with `metrics` | Can diverge if a metric is retroactively inserted or corrected for a past date after the snapshot ran |
-| **Best for** | Low-to-medium data volumes where real-time accuracy matters | High data volumes or dashboards where slightly stale data is acceptable and query speed is the priority |
+| **Convergence guarantee** | N/A — always current | Snapshots converge to the true latest-per-day value within one cron cycle (~24 h) |
+| **Divergence risk** | None | Can diverge if a metric is retroactively inserted or corrected for a past date after the snapshot ran |
+| **Best for** | Low-to-medium data volumes where real-time, strongly-consistent accuracy matters | High data volumes or dashboards that can tolerate eventual consistency (~24 h staleness) in exchange for faster, pre-computed reads |
 
-**Chosen approach:** both endpoints are kept. v1 is the canonical answer; v2 is additive and shows how the system can be extended for performance without changing the existing contract.
+**Chosen approach:** both endpoints are kept. v1 is the canonical, strongly-consistent answer. v2 demonstrates an eventual-consistency pattern — trading a bounded staleness window for lower read latency — without breaking the existing v1 contract.
 
-## 6. Performance
+### 5.5 Performance
 
 - TypeORM index on `(userId, type, date, createdAt)` supports the main read paths.
 - Filtering and ordering happen in the database layer through TypeORM.
 - The v1 chart endpoint uses a raw SQL window function so latest-per-day reduction happens in the database, not in an application loop.
 - The v2 chart endpoint reads from the pre-computed `daily_metric_snapshots` table, avoiding the window function entirely. It is faster at large data volumes because the heavy work is done offline by the cron job.
 - Unit conversion runs after filtering, so only the final result set is transformed.
+
+## 6. Scaling Further
+
+The current design is intentionally simple and targets a single-instance deployment with a small user base. As the system grows, the following approaches could be adopted incrementally.
+
+### 6.1 Write-Heavy Load — Consider a Time-Series or Document Store
+
+SQLite (and even PostgreSQL with a relational schema) can become a bottleneck when ingestion volume is high, because every insert hits the same indexed table.
+
+Alternatives:
+
+- **InfluxDB / TimescaleDB** — purpose-built for append-heavy time-series data. TimescaleDB in particular is a PostgreSQL extension, so TypeORM migrations and existing SQL knowledge transfer directly.
+- **MongoDB** — document model fits the metric payload naturally. Write throughput scales via sharding on `userId`; reads can leverage aggregation pipelines instead of window functions.
+- **Redis Streams / Kafka** — for burst ingestion, decouple the HTTP write path from persistence by publishing to a stream and consuming asynchronously. This prevents the database from being the bottleneck during traffic spikes.
+
+### 6.2 Read Scalability — CQRS and Read Replicas
+
+The current architecture co-locates reads and writes. Separating them enables independent scaling:
+
+- **CQRS (Command Query Responsibility Segregation)** — split the write model (`MetricsService.createMetric`) from the read model (`getChartData`, `listMetrics`). Commands write to the source-of-truth store; a projection process (the existing cron job is a rudimentary version of this) maintains a read-optimised view.
+- **Read replicas** — in PostgreSQL, streaming replication lets read queries run against replicas while writes go to the primary. The v2 snapshot table is already read-only and an ideal candidate to serve from a replica.
+- **Materialised views** — instead of the application-level cron, the snapshot logic can be expressed as a database materialised view refreshed on a schedule, offloading the work entirely to the database engine.
+
+### 6.3 Microservices Split
+
+If metric types grow or teams scale, the monolith can be decomposed:
+
+- **Ingestion service** — accepts writes, validates, publishes a `metric.created` event to a message broker (Kafka, RabbitMQ).
+- **Query service** — subscribes to events, maintains its own read-optimised store (e.g. a pre-aggregated time-series collection), and serves chart and list endpoints. This service can be scaled independently of the write path.
+- **Snapshot/projection worker** — replaces `MetricsCronService`; a dedicated consumer that updates materialised views in near-real-time instead of once per day, reducing the eventual consistency window from ~24 h to seconds.
+
+### 6.4 API Gateway and Versioning
+
+With v1 and v2 already in place, an API gateway (Kong, AWS API Gateway, or an Nginx reverse proxy) can route traffic between versions without changing the application code. This also enables:
+
+- gradual traffic shifting (canary releases)
+- rate limiting per `userId`
+- centralised request logging and tracing
 
 ## 7. Code Structure
 
